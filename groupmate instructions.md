@@ -1,13 +1,17 @@
 run via pycharm terminal --- dependancies
 
 pip install fastapi uvicorn | 
+
 pip install requests | 
+
 pip install backboard-sdk |
 
 
 
 to start server- uvicorn main:app --reload
-stop server- 
+
+stop server- ctrl+c
+
 signup for backboard.io -- devmode
 
 redeem code HACKWESTX for LLM token access
