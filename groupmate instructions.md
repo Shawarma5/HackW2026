@@ -1,8 +1,10 @@
 run via pycharm terminal --- dependancies
 
-pip install fastapi uvicorn
-pip install requests
-pip install backboard-sdk
+pip install fastapi uvicorn | 
+pip install requests | 
+pip install backboard-sdk |
+
+
 
 to start server- uvicorn main:app --reload
 stop server- 
