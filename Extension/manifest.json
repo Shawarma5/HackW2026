@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "CS Concept Learner",
+  "version": "1.0",
+  "description": "Highlight CS terms to get AI-powered definitions and examples.",
+  "permissions": ["activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ]
+}
