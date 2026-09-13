@@ -161,14 +161,25 @@ document.addEventListener('mouseup', (event) => {
     popup.style.left = `${Math.max(10, Math.min(left, maxLeft))}px`;
     popup.style.top = `${Math.max(10, Math.min(top, maxTop))}px`;
 
+    // Dismissing the popup removes it from the DOM immediately (on
+    // mousedown), but the text is still highlighted at that point. If we
+    // don't clear it here, the mouseup event that follows right after
+    // sees "no popup" + "text still selected" and immediately recreates
+    // the popup for the same selection -- which looks like the box never
+    // actually closes. Clearing the selection on dismiss avoids that.
+    function dismissPopup() {
+      popup.remove();
+      window.getSelection().removeAllRanges();
+    }
+
     popup.querySelector('.cs-popup-close').onmousedown = (e) => {
       e.stopPropagation();
-      popup.remove();
+      dismissPopup();
     };
 
     popup.querySelector('#cs-confirm-no').onmousedown = (e) => {
       e.stopPropagation();
-      popup.remove();
+      dismissPopup();
     };
 
     // Confirming doesn't fetch anything itself -- it just hands off to
@@ -176,7 +187,7 @@ document.addEventListener('mouseup', (event) => {
     // the definition itself (see openSidebarForTerm below).
     popup.querySelector('#cs-confirm-yes').onmousedown = (e) => {
       e.stopPropagation();
-      popup.remove();
+      dismissPopup();
       openSidebarForTerm(selectedText);
     };
   }
