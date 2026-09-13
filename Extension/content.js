@@ -131,11 +131,7 @@ document.addEventListener('mouseup', (event) => {
     popup.innerHTML = `
       <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
       <strong>Term:</strong> ${escapeHTML(selectedText)} <br><br>
-      Explain this term?
-      <div style="display:flex; gap:8px; margin-top:12px;">
-        <button id="cs-confirm-yes" style="flex:1; padding:6px 12px; background:#4CAF50; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Yes, explain</button>
-        <button id="cs-confirm-no" style="padding:6px 12px; background:#333; color:#ccc; border:none; border-radius:4px; cursor:pointer;">Not now</button>
-      </div>
+      <span class="cs-spinner"></span><em class="cs-loading-text">Fetching definition</em>
     `;
 
     popup.style.position = 'absolute';
@@ -172,24 +168,70 @@ document.addEventListener('mouseup', (event) => {
       window.getSelection().removeAllRanges();
     }
 
-    popup.querySelector('.cs-popup-close').onmousedown = (e) => {
-      e.stopPropagation();
-      dismissPopup();
-    };
+    // Re-wires the close (x) button any time we replace popup.innerHTML,
+    // since doing so wipes out the previous button along with its handler.
+    function attachCloseHandler() {
+      popup.querySelector('.cs-popup-close').onmousedown = (e) => {
+        e.stopPropagation();
+        dismissPopup();
+      };
+    }
+    attachCloseHandler();
 
-    popup.querySelector('#cs-confirm-no').onmousedown = (e) => {
-      e.stopPropagation();
-      dismissPopup();
-    };
+    fetch(`http://localhost:8000/define?term=${encodeURIComponent(selectedText)}`)
+      .then(response => response.json())
+      .then(data => {
+        // The user already dismissed this popup -- don't resurrect it.
+        if (!document.body.contains(popup)) return;
 
-    // Confirming doesn't fetch anything itself -- it just hands off to
-    // the sidebar, which opens right away in a loading state and fetches
-    // the definition itself (see openSidebarForTerm below).
-    popup.querySelector('#cs-confirm-yes').onmousedown = (e) => {
-      e.stopPropagation();
-      dismissPopup();
-      openSidebarForTerm(selectedText);
-    };
+        if (data.error) {
+          popup.innerHTML = `
+            <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+            <strong style="color:#ff8888;">Backend Error:</strong> ${escapeHTML(data.error)}
+          `;
+          attachCloseHandler();
+          return;
+        }
+
+        // Short, concise definition only -- the full detailed
+        // definition/analogy/code/quiz live in the sidebar.
+        popup.innerHTML = `
+          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+          <strong>${escapeHTML(data.term)}</strong><br><br>${escapeHTML(data.short_definition)}
+        `;
+        attachCloseHandler();
+
+        // Only CS/programming-adjacent terms get the "Explore in Python"
+        // button -- e.g. "recursion" gets it, "photosynthesis" doesn't.
+        if (data.is_cs_term) {
+          let btn = document.createElement('button');
+          btn.innerText = "Explore in Python >";
+          btn.style.marginTop = "12px";
+          btn.style.padding = "6px 12px";
+          btn.style.backgroundColor = "#4CAF50";
+          btn.style.color = "#fff";
+          btn.style.border = "none";
+          btn.style.borderRadius = "4px";
+          btn.style.cursor = "pointer";
+          btn.style.width = "100%";
+
+          btn.onmousedown = (e) => {
+            e.stopPropagation();
+            dismissPopup();
+            openSidebar(data);
+          };
+          popup.appendChild(btn);
+        }
+      })
+      .catch(() => {
+        if (!document.body.contains(popup)) return;
+
+        popup.innerHTML = `
+          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+          <strong style="color:#ff8888;">Error:</strong> Could not connect to local server.
+        `;
+        attachCloseHandler();
+      });
   }
 });
 
@@ -203,12 +245,6 @@ document.addEventListener('mousedown', (event) => {
 // Tracks whatever narration audio is currently playing so a newly opened
 // sidebar (or a page-wide selection) can stop the previous one first.
 let activeNarrationAudio = null;
-
-// Monotonically increasing token so a stale /define response (from a
-// sidebar the user already closed, or replaced by highlighting a new
-// term before the first one finished loading) never overwrites whatever
-// is currently on screen.
-let sidebarRequestToken = 0;
 
 // Builds the empty sidebar frame (panel + resizer + scrollable content
 // area) and attaches it to the page. Callers fill in contentContainer's
@@ -277,21 +313,11 @@ function createSidebarShell() {
   return { sidebar, contentContainer };
 }
 
-// Renders the close button + heading + a centered spinner/ellipsis into
-// an already-open sidebar's content area. Shared by the initial loading
-// state and by the error state (which keeps the same header).
-function renderSidebarHeader(contentContainer, term, bodyHTML) {
-  contentContainer.innerHTML = `
-    <button id="close-sidebar" style="float:right; background:none; border:none; color:#e8e6e3; font-size:20px; cursor:pointer;">&times;</button>
-    <h2 style="margin-top:0; margin-bottom:24px; color:#4CAF50;">${escapeHTML(term)}</h2>
-    ${bodyHTML}
-  `;
-}
-
-// Opens the sidebar immediately in a loading state for `term`, then
-// fetches its definition in the background and fills the sidebar in
-// once the response arrives (or shows an error in place if it fails).
-function openSidebarForTerm(term) {
+// Opens the sidebar and renders the already-fetched definition data
+// straight into it -- by the time this is called (from the "Explore in
+// Python" button), /define has already succeeded once for the popup, so
+// there's no need to fetch or show a loading state again.
+function openSidebar(data) {
   let existingSidebar = document.getElementById('cs-term-sidebar');
   if (existingSidebar) existingSidebar.remove();
 
@@ -302,42 +328,8 @@ function openSidebarForTerm(term) {
 
   ensureCsStyles();
 
-  let thisRequest = ++sidebarRequestToken;
   let { sidebar, contentContainer } = createSidebarShell();
-
-  renderSidebarHeader(contentContainer, term, `
-    <div style="display:flex; align-items:center; justify-content:center; padding:60px 0; color:#ccc;">
-      <span class="cs-spinner" style="width:18px; height:18px; margin-right:10px;"></span>
-      <em class="cs-loading-text" style="font-size:15px;">Fetching definition</em>
-    </div>
-  `);
-  document.getElementById('close-sidebar').onclick = () => sidebar.remove();
-
-  fetch(`http://localhost:8000/define?term=${encodeURIComponent(term)}`)
-    .then(response => response.json())
-    .then(data => {
-      // Bail out if the user closed this sidebar, or opened a newer one
-      // for a different term, while this request was still in flight.
-      if (thisRequest !== sidebarRequestToken || !document.body.contains(sidebar)) return;
-
-      if (data.error) {
-        renderSidebarHeader(contentContainer, term, `
-          <p style="color:#ff8888;">Backend Error: ${escapeHTML(data.error)}</p>
-        `);
-        document.getElementById('close-sidebar').onclick = () => sidebar.remove();
-        return;
-      }
-
-      renderSidebarContent(sidebar, contentContainer, data);
-    })
-    .catch(() => {
-      if (thisRequest !== sidebarRequestToken || !document.body.contains(sidebar)) return;
-
-      renderSidebarHeader(contentContainer, term, `
-        <p style="color:#ff8888;">Could not connect to local server.</p>
-      `);
-      document.getElementById('close-sidebar').onclick = () => sidebar.remove();
-    });
+  renderSidebarContent(sidebar, contentContainer, data);
 }
 
 // Fills an already-open sidebar with the full definition/analogy/use
