@@ -1,8 +1,113 @@
+// ============================================================
+// PYODIDE (in-browser Python execution)
+// ============================================================
+// Loaded lazily on first "Run Code" click, then cached for the
+// rest of the page's life.
+//
+// IMPORTANT: Manifest V3 blocks extensions from loading remotely
+// hosted script, even via dynamic import() -- this is enforced by
+// Chrome itself, not just a manifest setting you can loosen. So
+// Pyodide's files must be bundled inside the extension (in a
+// pyodide/ folder, declared under web_accessible_resources) and
+// loaded from chrome-extension://<id>/pyodide/, which is already
+// an allowed script-src origin.
+const PYODIDE_INDEX_URL = chrome.runtime.getURL("pyodide/");
+
+let pyodideReadyPromise = null;
+
+function getPyodide() {
+  if (!pyodideReadyPromise) {
+    pyodideReadyPromise = (async () => {
+      const { loadPyodide } = await import(
+        /* webpackIgnore: true */ `${PYODIDE_INDEX_URL}pyodide.mjs`
+      );
+      return loadPyodide({ indexURL: PYODIDE_INDEX_URL });
+    })();
+  }
+  return pyodideReadyPromise;
+}
+
+// Runs `code` in Pyodide and captures stdout/stderr instead of
+// letting them go to the devtools console.
+async function runPythonCode(code) {
+  const pyodide = await getPyodide();
+
+  let stdout = "";
+  let stderr = "";
+
+  pyodide.setStdout({ batched: (msg) => { stdout += msg + "\n"; } });
+  pyodide.setStderr({ batched: (msg) => { stderr += msg + "\n"; } });
+
+  // Fresh globals dict per run so leftover defs/variables from a
+  // previous "Run Code" click don't leak into this one (the
+  // pyodide instance itself is still reused/cached -- only the
+  // namespace code executes in is reset).
+  const namespace = pyodide.globals.get("dict")();
+
+  try {
+    await pyodide.loadPackagesFromImports(code);
+    await pyodide.runPythonAsync(code, { globals: namespace });
+    return { stdout, stderr, error: null };
+  } catch (err) {
+    return { stdout, stderr, error: err.message || String(err) };
+  } finally {
+    namespace.destroy();
+  }
+}
+
 function escapeHTML(str) {
   if (!str) return "";
   return str.replace(/[&<>'"]/g, tag => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   }[tag]));
+}
+
+// Injected once so the popup's loading state can show a spinner
+// + a moving "..." instead of static text that looks frozen.
+function ensureCsStyles() {
+  if (document.getElementById('cs-term-styles')) return;
+
+  let style = document.createElement('style');
+  style.id = 'cs-term-styles';
+  style.textContent = `
+    @keyframes cs-spin { to { transform: rotate(360deg); } }
+    @keyframes cs-ellipsis {
+      0%   { content: ''; }
+      25%  { content: '.'; }
+      50%  { content: '..'; }
+      75%  { content: '...'; }
+      100% { content: ''; }
+    }
+    @keyframes cs-fade-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .cs-spinner {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      margin-right: 8px;
+      vertical-align: middle;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #4CAF50;
+      border-radius: 50%;
+      animation: cs-spin 0.7s linear infinite;
+    }
+    .cs-loading-text {
+      vertical-align: middle;
+    }
+    .cs-loading-text::after {
+      content: '';
+      display: inline-block;
+      width: 1.2em;
+      text-align: left;
+      animation: cs-ellipsis 1.2s steps(4, end) infinite;
+    }
+    #cs-term-popup, #cs-term-sidebar {
+      animation: cs-fade-in 0.15s ease-out;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
 document.addEventListener('mouseup', (event) => {
@@ -19,16 +124,20 @@ document.addEventListener('mouseup', (event) => {
   }
 
   if (selectedText.length > 0) {
+    ensureCsStyles();
+
     let popup = document.createElement('div');
     popup.id = 'cs-term-popup';
-    popup.innerHTML = `<strong>Term:</strong> ${selectedText} <br><br> <em>Fetching definition...</em>`;
+    popup.innerHTML = `
+      <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+      <strong>Term:</strong> ${escapeHTML(selectedText)} <br><br>
+      <span class="cs-spinner"></span><em class="cs-loading-text">Fetching definition</em>
+    `;
 
     popup.style.position = 'absolute';
-    popup.style.left = `${event.pageX + 10}px`;
-    popup.style.top = `${event.pageY + 15}px`;
     popup.style.backgroundColor = '#202122';
     popup.style.color = '#f8f9fa';
-    popup.style.padding = '12px';
+    popup.style.padding = '12px 24px 12px 12px';
     popup.style.borderRadius = '6px';
     popup.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
     popup.style.zIndex = '2147483647';
@@ -38,20 +147,49 @@ document.addEventListener('mouseup', (event) => {
 
     document.body.appendChild(popup);
 
+    // Position after appending (so we can measure it), and clamp
+    // to the viewport so it never renders off the right/bottom edge.
+    let popupRect = popup.getBoundingClientRect();
+    let left = event.pageX + 10;
+    let top = event.pageY + 15;
+    let maxLeft = window.scrollX + document.documentElement.clientWidth - popupRect.width - 10;
+    let maxTop = window.scrollY + document.documentElement.clientHeight - popupRect.height - 10;
+    popup.style.left = `${Math.max(10, Math.min(left, maxLeft))}px`;
+    popup.style.top = `${Math.max(10, Math.min(top, maxTop))}px`;
+
+    popup.querySelector('.cs-popup-close').onmousedown = (e) => {
+      e.stopPropagation();
+      popup.remove();
+    };
+
     fetch(`http://localhost:8000/define?term=${encodeURIComponent(selectedText)}`)
       .then(response => response.json())
       .then(data => {
         if (data.error) {
-          popup.innerHTML = `<strong>Backend Error:</strong> ${data.error}`;
+          popup.innerHTML = `
+            <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+            <strong style="color:#ff8888;">Backend Error:</strong> ${escapeHTML(data.error)}
+          `;
+          popup.querySelector('.cs-popup-close').onmousedown = (e) => {
+            e.stopPropagation();
+            popup.remove();
+          };
           return;
         }
 
         // Updated Tooltip: Only shows the short definition
-        popup.innerHTML = `<strong>${data.term}</strong><br><br>${data.short_definition}`;
+        popup.innerHTML = `
+          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+          <strong>${escapeHTML(data.term)}</strong><br><br>${escapeHTML(data.short_definition)}
+        `;
+        popup.querySelector('.cs-popup-close').onmousedown = (e) => {
+          e.stopPropagation();
+          popup.remove();
+        };
 
         if (data.is_cs_term) {
           let btn = document.createElement('button');
-          btn.innerText = "Explore in C >";
+          btn.innerText = "Explore in Python >";
           btn.style.marginTop = "12px";
           btn.style.padding = "6px 12px";
           btn.style.backgroundColor = "#4CAF50";
@@ -70,7 +208,14 @@ document.addEventListener('mouseup', (event) => {
         }
       })
       .catch(error => {
-        popup.innerHTML = `<strong>Error:</strong> Could not connect to local server.`;
+        popup.innerHTML = `
+          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
+          <strong style="color:#ff8888;">Error:</strong> Could not connect to local server.
+        `;
+        popup.querySelector('.cs-popup-close').onmousedown = (e) => {
+          e.stopPropagation();
+          popup.remove();
+        };
       });
   }
 });
@@ -102,7 +247,9 @@ function openSidebar(data) {
 
   let contentContainer = document.createElement('div');
   contentContainer.style.padding = '24px';
+  contentContainer.style.paddingBottom = '80px';
   contentContainer.style.height = '100%';
+  contentContainer.style.boxSizing = 'border-box';
   contentContainer.style.overflowY = 'auto';
 
   let resizer = document.createElement('div');
@@ -143,19 +290,29 @@ function openSidebar(data) {
   // Updated Sidebar HTML Structure
   contentContainer.innerHTML = `
     <button id="close-sidebar" style="float:right; background:none; border:none; color:#e8e6e3; font-size:20px; cursor:pointer;">&times;</button>
-    <h2 style="margin-top:0; color:#4CAF50;">${data.term}</h2>
+    <h2 style="margin-top:0; color:#4CAF50;">${escapeHTML(data.term)}</h2>
     
     <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Definition</h3>
-    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${data.detailed_definition}</p>
+    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.detailed_definition)}</p>
     
     <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Analogy</h3>
-    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${data.analogy}</p>
+    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.analogy)}</p>
     
     <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Use Case</h3>
-    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${data.use_case}</p>
+    <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.use_case)}</p>
     
-    <h3 style="margin-top: 24px; border-bottom: 1px solid #333; padding-bottom: 4px;">C Implementation</h3>
-    <pre style="background:#000; padding:12px; border-radius:6px; overflow-x:auto;"><code>${escapeHTML(data.c_code_example)}</code></pre>
+    <h3 style="margin-top: 24px; border-bottom: 1px solid #333; padding-bottom: 4px;">Python Implementation</h3>
+    <textarea id="code-editor" spellcheck="false" style="width:100%; min-height:120px; background:#000; color:#e8e6e3; padding:12px; border-radius:6px; border:1px solid #333; font-family:monospace; font-size:13px; line-height:1.4; box-sizing:border-box; resize:vertical; white-space:pre;">${escapeHTML(data.python_code_example)}</textarea>
+
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button id="run-code-btn" style="flex:1; padding:8px 16px; background:#ff9800; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Run Code</button>
+      <button id="reset-code-btn" title="Restore original code" style="padding:8px 12px; background:#333; color:#ccc; border:none; border-radius:4px; cursor:pointer;">Reset</button>
+    </div>
+    <div id="code-output" style="margin-top:12px; padding:10px; background:#000; border:1px solid #444; border-radius:4px; display:none; white-space:pre-wrap; font-family:monospace; font-size:13px;"></div>
+    ${data.experiment_prompt ? `
+    <div style="margin-top:12px; padding:10px 12px; background:#1a2a1e; border-left:3px solid #4CAF50; border-radius:4px; color:#c8e6c9; font-size:13px; line-height:1.4;">
+      💡 <em>${escapeHTML(data.experiment_prompt)}</em>
+    </div>` : ''}
     
     <hr style="border-color:#333; margin: 30px 0;">
     
@@ -167,7 +324,7 @@ function openSidebar(data) {
     <!-- Hidden Quiz Section -->
     <div id="quiz-section" style="display:none;">
         <h3 style="color: #007acc;">Knowledge Check</h3>
-        <p style="line-height: 1.4;">${data.quiz_question}</p>
+        <p style="line-height: 1.4;">${escapeHTML(data.quiz_question)}</p>
         <textarea id="quiz-answer" placeholder="Type your answer here..." rows="1" style="width:100%; padding:8px; margin-bottom:10px; background:#222; color:#fff; border:1px solid #444; border-radius:4px; resize:none; overflow:hidden; font-family:sans-serif; box-sizing:border-box;"></textarea>
         <button id="submit-quiz" style="padding:8px 16px; background:#4CAF50; color:#fff; border:none; border-radius:4px; cursor:pointer;">Submit</button>
         <div id="quiz-feedback" style="margin-top:12px; padding: 10px; border-radius: 4px; display: none; line-height: 1.4;"></div>
@@ -243,5 +400,56 @@ function openSidebar(data) {
     }
   };
 
+  // Code Execution Logic
+  let runBtn = document.getElementById('run-code-btn');
+  let resetBtn = document.getElementById('reset-code-btn');
+  let outputDiv = document.getElementById('code-output');
+  let codeEditor = document.getElementById('code-editor');
+
+  if (resetBtn && codeEditor) {
+    resetBtn.onclick = () => {
+      codeEditor.value = data.python_code_example;
+    };
+  }
+
+  if (runBtn) {
+    runBtn.onclick = async () => {
+      runBtn.disabled = true;
+      outputDiv.style.display = 'block';
+      outputDiv.style.color = '#aaa';
+
+      // First run on a page downloads the Pyodide runtime (a few
+      // MB), so it's noticeably slower than subsequent runs.
+      let isFirstLoad = !pyodideReadyPromise;
+      runBtn.innerText = isFirstLoad ? "Loading Python..." : "Running...";
+      outputDiv.innerText = isFirstLoad
+        ? "Loading Python runtime (first run only, ~5-10s)..."
+        : "Executing...";
+
+      try {
+        let result = await runPythonCode(codeEditor.value);
+
+        if (result.error) {
+          outputDiv.style.color = '#ff8888';
+          outputDiv.innerText = result.stderr
+            ? `${result.stderr}\n${result.error}`
+            : result.error;
+        } else if (result.stderr) {
+          outputDiv.style.color = '#ff8888';
+          outputDiv.innerText = result.stderr;
+        } else {
+          outputDiv.style.color = '#4CAF50';
+          outputDiv.innerText = result.stdout || "Code executed successfully (no output).";
+        }
+      } catch (err) {
+        outputDiv.style.color = '#ff8888';
+        outputDiv.innerText = "Error: Could not load or run the Python runtime.";
+      } finally {
+        runBtn.innerText = "Run Code";
+        runBtn.disabled = false;
+      }
+    };
+  }
+  
   document.getElementById('close-sidebar').onclick = () => sidebar.remove();
 }
