@@ -131,7 +131,11 @@ document.addEventListener('mouseup', (event) => {
     popup.innerHTML = `
       <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
       <strong>Term:</strong> ${escapeHTML(selectedText)} <br><br>
-      <span class="cs-spinner"></span><em class="cs-loading-text">Fetching definition</em>
+      Explain this term?
+      <div style="display:flex; gap:8px; margin-top:12px;">
+        <button id="cs-confirm-yes" style="flex:1; padding:6px 12px; background:#4CAF50; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:bold;">Yes, explain</button>
+        <button id="cs-confirm-no" style="padding:6px 12px; background:#333; color:#ccc; border:none; border-radius:4px; cursor:pointer;">Not now</button>
+      </div>
     `;
 
     popup.style.position = 'absolute';
@@ -162,61 +166,19 @@ document.addEventListener('mouseup', (event) => {
       popup.remove();
     };
 
-    fetch(`http://localhost:8000/define?term=${encodeURIComponent(selectedText)}`)
-      .then(response => response.json())
-      .then(data => {
-        if (data.error) {
-          popup.innerHTML = `
-            <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
-            <strong style="color:#ff8888;">Backend Error:</strong> ${escapeHTML(data.error)}
-          `;
-          popup.querySelector('.cs-popup-close').onmousedown = (e) => {
-            e.stopPropagation();
-            popup.remove();
-          };
-          return;
-        }
+    popup.querySelector('#cs-confirm-no').onmousedown = (e) => {
+      e.stopPropagation();
+      popup.remove();
+    };
 
-        // Updated Tooltip: Only shows the short definition
-        popup.innerHTML = `
-          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
-          <strong>${escapeHTML(data.term)}</strong><br><br>${escapeHTML(data.short_definition)}
-        `;
-        popup.querySelector('.cs-popup-close').onmousedown = (e) => {
-          e.stopPropagation();
-          popup.remove();
-        };
-
-        if (data.is_cs_term) {
-          let btn = document.createElement('button');
-          btn.innerText = "Explore in Python >";
-          btn.style.marginTop = "12px";
-          btn.style.padding = "6px 12px";
-          btn.style.backgroundColor = "#4CAF50";
-          btn.style.color = "#fff";
-          btn.style.border = "none";
-          btn.style.borderRadius = "4px";
-          btn.style.cursor = "pointer";
-          btn.style.width = "100%";
-
-          btn.onmousedown = (e) => {
-            e.stopPropagation();
-            popup.remove();
-            openSidebar(data);
-          };
-          popup.appendChild(btn);
-        }
-      })
-      .catch(error => {
-        popup.innerHTML = `
-          <button class="cs-popup-close" style="position:absolute; top:6px; right:8px; background:none; border:none; color:#aaa; font-size:16px; line-height:1; cursor:pointer; padding:0;">&times;</button>
-          <strong style="color:#ff8888;">Error:</strong> Could not connect to local server.
-        `;
-        popup.querySelector('.cs-popup-close').onmousedown = (e) => {
-          e.stopPropagation();
-          popup.remove();
-        };
-      });
+    // Confirming doesn't fetch anything itself -- it just hands off to
+    // the sidebar, which opens right away in a loading state and fetches
+    // the definition itself (see openSidebarForTerm below).
+    popup.querySelector('#cs-confirm-yes').onmousedown = (e) => {
+      e.stopPropagation();
+      popup.remove();
+      openSidebarForTerm(selectedText);
+    };
   }
 });
 
@@ -227,10 +189,20 @@ document.addEventListener('mousedown', (event) => {
   }
 });
 
-function openSidebar(data) {
-  let existingSidebar = document.getElementById('cs-term-sidebar');
-  if (existingSidebar) existingSidebar.remove();
+// Tracks whatever narration audio is currently playing so a newly opened
+// sidebar (or a page-wide selection) can stop the previous one first.
+let activeNarrationAudio = null;
 
+// Monotonically increasing token so a stale /define response (from a
+// sidebar the user already closed, or replaced by highlighting a new
+// term before the first one finished loading) never overwrites whatever
+// is currently on screen.
+let sidebarRequestToken = 0;
+
+// Builds the empty sidebar frame (panel + resizer + scrollable content
+// area) and attaches it to the page. Callers fill in contentContainer's
+// innerHTML afterward -- this only handles the chrome around it.
+function createSidebarShell() {
   let sidebar = document.createElement('div');
   sidebar.id = 'cs-term-sidebar';
   sidebar.style.position = 'fixed';
@@ -287,11 +259,88 @@ function openSidebar(data) {
     }
   });
 
-  // Updated Sidebar HTML Structure
+  sidebar.appendChild(resizer);
+  sidebar.appendChild(contentContainer);
+  document.body.appendChild(sidebar);
+
+  return { sidebar, contentContainer };
+}
+
+// Renders the close button + heading + a centered spinner/ellipsis into
+// an already-open sidebar's content area. Shared by the initial loading
+// state and by the error state (which keeps the same header).
+function renderSidebarHeader(contentContainer, term, bodyHTML) {
   contentContainer.innerHTML = `
     <button id="close-sidebar" style="float:right; background:none; border:none; color:#e8e6e3; font-size:20px; cursor:pointer;">&times;</button>
-    <h2 style="margin-top:0; color:#4CAF50;">${escapeHTML(data.term)}</h2>
-    
+    <h2 style="margin-top:0; margin-bottom:24px; color:#4CAF50;">${escapeHTML(term)}</h2>
+    ${bodyHTML}
+  `;
+}
+
+// Opens the sidebar immediately in a loading state for `term`, then
+// fetches its definition in the background and fills the sidebar in
+// once the response arrives (or shows an error in place if it fails).
+function openSidebarForTerm(term) {
+  let existingSidebar = document.getElementById('cs-term-sidebar');
+  if (existingSidebar) existingSidebar.remove();
+
+  if (activeNarrationAudio) {
+    activeNarrationAudio.pause();
+    activeNarrationAudio = null;
+  }
+
+  ensureCsStyles();
+
+  let thisRequest = ++sidebarRequestToken;
+  let { sidebar, contentContainer } = createSidebarShell();
+
+  renderSidebarHeader(contentContainer, term, `
+    <div style="display:flex; align-items:center; justify-content:center; padding:60px 0; color:#ccc;">
+      <span class="cs-spinner" style="width:18px; height:18px; margin-right:10px;"></span>
+      <em class="cs-loading-text" style="font-size:15px;">Fetching definition</em>
+    </div>
+  `);
+  document.getElementById('close-sidebar').onclick = () => sidebar.remove();
+
+  fetch(`http://localhost:8000/define?term=${encodeURIComponent(term)}`)
+    .then(response => response.json())
+    .then(data => {
+      // Bail out if the user closed this sidebar, or opened a newer one
+      // for a different term, while this request was still in flight.
+      if (thisRequest !== sidebarRequestToken || !document.body.contains(sidebar)) return;
+
+      if (data.error) {
+        renderSidebarHeader(contentContainer, term, `
+          <p style="color:#ff8888;">Backend Error: ${escapeHTML(data.error)}</p>
+        `);
+        document.getElementById('close-sidebar').onclick = () => sidebar.remove();
+        return;
+      }
+
+      renderSidebarContent(sidebar, contentContainer, data);
+    })
+    .catch(() => {
+      if (thisRequest !== sidebarRequestToken || !document.body.contains(sidebar)) return;
+
+      renderSidebarHeader(contentContainer, term, `
+        <p style="color:#ff8888;">Could not connect to local server.</p>
+      `);
+      document.getElementById('close-sidebar').onclick = () => sidebar.remove();
+    });
+}
+
+// Fills an already-open sidebar with the full definition/analogy/use
+// case/code/quiz content once /define has returned, and wires up all of
+// its interactive bits (narration, quiz grading, code execution).
+function renderSidebarContent(sidebar, contentContainer, data) {
+  contentContainer.innerHTML = `
+    <button id="close-sidebar" style="float:right; background:none; border:none; color:#e8e6e3; font-size:20px; cursor:pointer;">&times;</button>
+    <h2 style="margin-top:0; margin-bottom:4px; color:#4CAF50;">${escapeHTML(data.term)}</h2>
+
+    <button id="narrate-btn" style="display:flex; align-items:center; gap:6px; margin-bottom:16px; padding:6px 14px; background:#2a2b2c; color:#e8e6e3; border:1px solid #444; border-radius:20px; cursor:pointer; font-size:13px;">
+      <span id="narrate-icon">🔊</span><span id="narrate-label">Narrate</span>
+    </button>
+
     <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Definition</h3>
     <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.detailed_definition)}</p>
     
@@ -330,10 +379,6 @@ function openSidebar(data) {
         <div id="quiz-feedback" style="margin-top:12px; padding: 10px; border-radius: 4px; display: none; line-height: 1.4;"></div>
     </div>
   `;
-
-  sidebar.appendChild(resizer);
-  sidebar.appendChild(contentContainer);
-  document.body.appendChild(sidebar);
 
   // Unhide Quiz Logic
   document.getElementById('show-quiz-btn').onclick = () => {
@@ -451,5 +496,89 @@ function openSidebar(data) {
     };
   }
   
-  document.getElementById('close-sidebar').onclick = () => sidebar.remove();
+  // Narration Logic (ElevenLabs text-to-speech of the definition + analogy)
+  let narrateBtn = document.getElementById('narrate-btn');
+  let narrateIcon = document.getElementById('narrate-icon');
+  let narrateLabel = document.getElementById('narrate-label');
+  let narrateAudio = null;
+  let narrateObjectUrl = null;
+
+  function stopNarration() {
+    if (narrateAudio) {
+      narrateAudio.pause();
+    }
+    if (narrateObjectUrl) {
+      URL.revokeObjectURL(narrateObjectUrl);
+      narrateObjectUrl = null;
+    }
+  }
+
+  if (narrateBtn) {
+    narrateBtn.onclick = async () => {
+      // Already fetched -- just toggle play/pause instead of re-fetching.
+      if (narrateAudio) {
+        if (narrateAudio.paused) {
+          narrateAudio.play();
+          narrateIcon.innerText = '⏸';
+          narrateLabel.innerText = 'Pause';
+        } else {
+          narrateAudio.pause();
+          narrateIcon.innerText = '🔊';
+          narrateLabel.innerText = 'Narrate';
+        }
+        return;
+      }
+
+      narrateBtn.disabled = true;
+      narrateIcon.innerText = '⏳';
+      narrateLabel.textContent = 'Loading';
+      narrateLabel.classList.add('cs-loading-text');
+
+      try {
+        let narrationText = [data.detailed_definition, data.analogy]
+          .filter(Boolean)
+          .join('. ');
+
+        let response = await fetch('http://localhost:8000/narrate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: narrationText })
+        });
+
+        let contentType = response.headers.get('content-type') || '';
+
+        if (!response.ok || contentType.includes('application/json')) {
+          let errData = await response.json().catch(() => ({}));
+          throw new Error(errData.error || `Server returned ${response.status}`);
+        }
+
+        let audioBlob = await response.blob();
+        narrateObjectUrl = URL.createObjectURL(audioBlob);
+        narrateAudio = new Audio(narrateObjectUrl);
+
+        narrateAudio.onended = () => {
+          narrateIcon.innerText = '🔊';
+          narrateLabel.innerText = 'Narrate';
+        };
+
+        narrateLabel.classList.remove('cs-loading-text');
+        activeNarrationAudio = narrateAudio;
+        await narrateAudio.play();
+        narrateIcon.innerText = '⏸';
+        narrateLabel.innerText = 'Pause';
+      } catch (err) {
+        narrateLabel.classList.remove('cs-loading-text');
+        narrateIcon.innerText = '🔊';
+        narrateLabel.innerText = 'Narrate';
+        alert('Narration error: ' + err.message);
+      } finally {
+        narrateBtn.disabled = false;
+      }
+    };
+  }
+
+  document.getElementById('close-sidebar').onclick = () => {
+    stopNarration();
+    sidebar.remove();
+  };
 }

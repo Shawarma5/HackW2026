@@ -1,14 +1,26 @@
+import io
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from backboard import BackboardClient
+from elevenlabs.client import ElevenLabs
+from elevenlabs import VoiceSettings
 from pydantic import BaseModel
+from dotenv import load_dotenv
 import json
 
 app = FastAPI()
-key = "api_key.txt"
 
-with open(key, "r") as f:
-    key = f.read().strip()
+load_dotenv()  # reads a local .env file if present; no-op otherwise
+
+key = os.environ.get("BACKBOARD_API_KEY")
+if not key:
+    raise RuntimeError(
+        "BACKBOARD_API_KEY is not set. Create a .env file in this folder "
+        "(see .env.example) or set the environment variable directly, "
+        "then restart the server."
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,6 +30,23 @@ app.add_middleware(
 )
 
 client = BackboardClient(api_key=key)
+
+# ElevenLabs is used only for the optional "Narrate" button in the
+# sidebar, so its absence shouldn't take down the whole server the
+# way a missing BACKBOARD_API_KEY does -- we just disable /narrate.
+ELEVENLABS_VOICE_ID = "TWutjvRaJqAX89preB4e"  # "George"
+# NOTE: eleven_v3 does not support the `speed` voice setting, so we use
+# multilingual_v2 instead, which does -- needed to speak a bit faster.
+ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
+NARRATION_SPEED = 1.15  # 1.0 = normal; ElevenLabs allows roughly 0.7-1.2
+
+elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY")
+elevenlabs_client = ElevenLabs(api_key=elevenlabs_key) if elevenlabs_key else None
+if not elevenlabs_key:
+    print(
+        "WARNING: ELEVENLABS_API_KEY is not set. The /narrate endpoint "
+        "will return an error until it is configured."
+    )
 
 
 # ============================================================
@@ -185,3 +214,52 @@ Output raw JSON only.
 # content.js via Pyodide (WebAssembly), so there is no /execute
 # endpoint here anymore. The FastAPI backend only handles the
 # AI-generated definitions and quiz grading above.
+
+
+# ============================================================
+# NARRATE DEFINITION + ANALOGY (ElevenLabs text-to-speech)
+# ============================================================
+
+class NarrateRequest(BaseModel):
+    text: str
+
+
+@app.post("/narrate")
+async def narrate(req: NarrateRequest):
+    if elevenlabs_client is None:
+        return {
+            "error": "ELEVENLABS_API_KEY is not set on the server. Add it "
+                     "to your .env file and restart the server."
+        }
+
+    narration_text = req.text.strip()
+    if not narration_text:
+        return {"error": "No text was provided to narrate."}
+
+    try:
+        audio_stream = elevenlabs_client.text_to_speech.convert(
+            text=narration_text,
+            voice_id=ELEVENLABS_VOICE_ID,
+            model_id=ELEVENLABS_MODEL_ID,
+            output_format="mp3_44100_128",
+            voice_settings=VoiceSettings(
+                stability=0.5,
+                similarity_boost=0.75,
+                style=0.0,
+                use_speaker_boost=True,
+                speed=NARRATION_SPEED,
+            ),
+        )
+
+        # convert() returns a generator of audio chunks; collect them so
+        # we can hand back a normal streaming HTTP response of known type.
+        audio_bytes = b"".join(audio_stream)
+
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={"Content-Disposition": "inline; filename=narration.mp3"},
+        )
+
+    except Exception as e:
+        return {"error": str(e)}

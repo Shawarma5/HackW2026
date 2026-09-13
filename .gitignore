@@ -1,0 +1,13 @@
+# Secrets -- never commit these
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor/Windows cruft
+.vscode/
+thumbs.db
