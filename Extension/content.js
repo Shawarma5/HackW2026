@@ -344,16 +344,16 @@ function renderSidebarContent(sidebar, contentContainer, data) {
       <span id="narrate-icon">🔊</span><span id="narrate-label">Narrate</span>
     </button>
 
-    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Definition</h3>
+    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px; color:#4FC3F7;">Definition</h3>
     <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.detailed_definition)}</p>
     
-    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Analogy</h3>
+    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px; color:#4FC3F7;">Analogy</h3>
     <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.analogy)}</p>
     
-    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px;">Use Case</h3>
+    <h3 style="margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 4px; color:#4FC3F7;">Use Case</h3>
     <p style="color:#aaa; line-height: 1.5; margin-top: 8px;">${escapeHTML(data.use_case)}</p>
     
-    <h3 style="margin-top: 24px; border-bottom: 1px solid #333; padding-bottom: 4px;">Python Implementation</h3>
+    <h3 style="margin-top: 24px; border-bottom: 1px solid #333; padding-bottom: 4px; color:#4FC3F7;">Python Implementation</h3>
     <textarea id="code-editor" spellcheck="false" style="width:100%; min-height:120px; background:#000; color:#e8e6e3; padding:12px; border-radius:6px; border:1px solid #333; font-family:monospace; font-size:13px; line-height:1.4; box-sizing:border-box; resize:vertical; white-space:pre;">${escapeHTML(data.python_code_example)}</textarea>
 
     <div style="display:flex; gap:8px; margin-top:8px;">
